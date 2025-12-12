@@ -1,0 +1,14 @@
+{
+  "name": "slack-jira-problemas",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@slack/web-api": "^7.6.0",
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5"
+  }
+}
