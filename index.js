@@ -10,12 +10,18 @@ const PORT = process.env.PORT || 3000;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 
-const JIRA_BASE_URL = process.env.JIRA_BASE_URL;
+const JIRA_BASE_URL = (process.env.JIRA_BASE_URL || "").replace(/\/+$/, "");
 const JIRA_EMAIL = process.env.JIRA_EMAIL;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
 
 // Canal habilitado
 const ALLOWED_CHANNELS = new Set(["C099W0T9R2P"]);
+
+if (!SLACK_SIGNING_SECRET) throw new Error("Missing SLACK_SIGNING_SECRET");
+if (!SLACK_BOT_TOKEN) throw new Error("Missing SLACK_BOT_TOKEN");
+if (!JIRA_BASE_URL) throw new Error("Missing JIRA_BASE_URL");
+if (!JIRA_EMAIL) throw new Error("Missing JIRA_EMAIL");
+if (!JIRA_API_TOKEN) throw new Error("Missing JIRA_API_TOKEN");
 
 const slack = new WebClient(SLACK_BOT_TOKEN);
 
@@ -37,30 +43,67 @@ function verifySlackSignature(req) {
     .digest("hex");
 
   const expected = `v0=${hmac}`;
-  return crypto.timingSafeEqual(
-    Buffer.from(expected),
-    Buffer.from(signature)
-  );
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+  } catch {
+    return false;
+  }
 }
 
-function parseCommand(text) {
+function parseHashCommand(text) {
   if (!text) return null;
   const match = text.match(/(^|\s)#([a-zA-Z0-9_]+)/);
   return match ? match[2].toLowerCase() : null;
 }
 
 function jiraAuthHeader() {
-  const token = Buffer.from(
-    `${JIRA_EMAIL}:${JIRA_API_TOKEN}`
-  ).toString("base64");
-
+  const token = Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString("base64");
   return `Basic ${token}`;
 }
 
+async function jiraSearch(jql, maxResults = 50) {
+  const searchUrl =
+    `${JIRA_BASE_URL}/rest/api/3/search/jql` +
+    `?jql=${encodeURIComponent(jql)}` +
+    `&fields=${encodeURIComponent("summary,issuetype,status")}` +
+    `&maxResults=${encodeURIComponent(String(maxResults))}`;
+
+  const resp = await fetch(searchUrl, {
+    method: "GET",
+    headers: {
+      Authorization: jiraAuthHeader(),
+      Accept: "application/json",
+    },
+  });
+
+  const bodyText = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`Jira (${resp.status}): ${bodyText}`);
+  }
+  return JSON.parse(bodyText);
+}
+
+function buildCommandsHelp() {
+  return [
+    "*Comandos disponibles:*",
+    "• `#problemashoy` — Problemas creados hoy (Jira).",
+    "• `#detalleshoy` — Detalles creados hoy (Jira).",
+    "• `#comandos` — Lista de comandos.",
+  ].join("\n");
+}
+
+function formatIssueLine(issue) {
+  const key = issue.key;
+  const f = issue.fields || {};
+  const summary = (f.summary || "").toString();
+  const type = f.issuetype?.name || "";
+  const status = f.status?.name || "";
+  const url = `${JIRA_BASE_URL}/browse/${key}`;
+  return `• <${url}|${key}> — *${type}* — ${status} — ${summary}`;
+}
+
 // ───────── Healthcheck ─────────
-app.get("/", (_req, res) => {
-  res.status(200).send("ok");
-});
+app.get("/", (_req, res) => res.status(200).send("ok"));
 
 // ───────── Slack Events Endpoint ─────────
 app.post(
@@ -69,38 +112,55 @@ app.post(
   async (req, res) => {
     let payload;
 
-    // 1️⃣ Parse JSON primero
+    // Parse JSON primero
     try {
       payload = JSON.parse(req.body.toString("utf8"));
     } catch {
       return res.status(400).send("bad json");
     }
 
-    // 2️⃣ URL verification (ANTES de validar firma)
+    // URL verification (challenge) primero
     if (payload.type === "url_verification") {
       return res.status(200).send(payload.challenge);
     }
 
-    // 3️⃣ Validar firma para eventos reales
+    // Firma para eventos reales
     if (!verifySlackSignature(req)) {
       return res.status(401).send("invalid signature");
     }
 
-    // 4️⃣ ACK inmediato
+    // ACK inmediato
     res.status(200).send("ok");
 
     if (payload.type !== "event_callback") return;
 
     const ev = payload.event;
 
+    // Solo mensajes “normales”
     if (!ev || ev.type !== "message" || ev.bot_id || ev.subtype) return;
+
+    // Canal permitido
     if (!ALLOWED_CHANNELS.has(ev.channel)) return;
 
-    const command = parseCommand(ev.text);
-    if (command !== "problemashoy") return;
+    const cmd = parseHashCommand(ev.text);
+    if (!cmd) return;
 
-    // ───────── JQL ─────────
-    const jql = `
+    // Responder siempre en thread
+    const thread_ts = ev.ts;
+
+    // ───────── #comandos ─────────
+    if (cmd === "comandos") {
+      await slack.chat.postMessage({
+        channel: ev.channel,
+        thread_ts,
+        text: buildCommandsHelp(),
+      });
+      return;
+    }
+
+    // ───────── #problemashoy ─────────
+    if (cmd === "problemashoy") {
+      const jqlProblemas = `
 issuetype in (
   "Problema Eléctrico",
   "Problema Mantenimiento",
@@ -109,62 +169,77 @@ issuetype in (
 )
 AND created >= startOfDay()
 ORDER BY created DESC
-    `.trim();
+      `.trim();
 
-    const searchUrl =
-      `${JIRA_BASE_URL}/rest/api/3/search/jql` +
-      `?jql=${encodeURIComponent(jql)}` +
-      `&fields=summary,issuetype,status` +
-      `&maxResults=50`;
+      try {
+        const data = await jiraSearch(jqlProblemas, 50);
+        const issues = data.issues || [];
 
-    try {
-      const jiraResp = await fetch(searchUrl, {
-        headers: {
-          Authorization: jiraAuthHeader(),
-          Accept: "application/json",
-        },
-      });
+        const today = new Date().toLocaleDateString("es-AR");
+        const header = `*Problemas de hoy* (${today}) — Total: *${issues.length}*`;
 
-      if (!jiraResp.ok) {
-  const errText = await jiraResp.text();
-  await slack.chat.postMessage({
-    channel: ev.channel,
-    thread_ts: ev.ts,
-    text: `Error consultando Jira (${jiraResp.status})\n${errText}`.slice(0, 2900),
-  });
-  return;
-}
+        const lines = issues.slice(0, 25).map(formatIssueLine);
+        const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
 
-
-      const data = await jiraResp.json();
-      const issues = data.issues || [];
-
-      let text;
-      if (issues.length === 0) {
-        text = "*Problemas de hoy*: no hay issues registradas.";
-      } else {
-        const lines = issues.map((it) => {
-          const key = it.key;
-          const summary = it.fields.summary;
-          const type = it.fields.issuetype.name;
-          const status = it.fields.status.name;
-          const url = `${JIRA_BASE_URL}/browse/${key}`;
-          return `• <${url}|${key}> — *${type}* — ${status} — ${summary}`;
+        await slack.chat.postMessage({
+          channel: ev.channel,
+          thread_ts,
+          text: `${header}\n${body}`.slice(0, 3800),
         });
-
-        text =
-          `*Problemas de hoy* — Total: *${issues.length}*\n` +
-          lines.join("\n");
+      } catch (err) {
+        await slack.chat.postMessage({
+          channel: ev.channel,
+          thread_ts,
+          text: `Error consultando Jira: ${err.message}`.slice(0, 3800),
+        });
       }
-
-      await slack.chat.postMessage({
-        channel: ev.channel,
-        thread_ts: ev.ts,
-        text,
-      });
-    } catch (err) {
-      console.error("Error ejecutando comando:", err);
+      return;
     }
+
+    // ───────── #detalleshoy ─────────
+    if (cmd === "detalleshoy") {
+      const jqlDetalles = `
+issuetype in (
+  "Detalle Eléctricidad",
+  "Detalle Mantenimiento",
+  "Detalle Jardinería",
+  "Detalle Infraestructura"
+)
+AND created >= startOfDay()
+ORDER BY created DESC
+      `.trim();
+
+      try {
+        const data = await jiraSearch(jqlDetalles, 50);
+        const issues = data.issues || [];
+
+        const today = new Date().toLocaleDateString("es-AR");
+        const header = `*Detalles de hoy* (${today}) — Total: *${issues.length}*`;
+
+        const lines = issues.slice(0, 25).map(formatIssueLine);
+        const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
+
+        await slack.chat.postMessage({
+          channel: ev.channel,
+          thread_ts,
+          text: `${header}\n${body}`.slice(0, 3800),
+        });
+      } catch (err) {
+        await slack.chat.postMessage({
+          channel: ev.channel,
+          thread_ts,
+          text: `Error consultando Jira: ${err.message}`.slice(0, 3800),
+        });
+      }
+      return;
+    }
+
+    // Comando no reconocido (si alguien escribe otro #...)
+    await slack.chat.postMessage({
+      channel: ev.channel,
+      thread_ts,
+      text: `Comando no reconocido. Escribí #comandos para ver la lista.`,
+    });
   }
 );
 
