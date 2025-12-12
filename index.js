@@ -126,13 +126,15 @@ ORDER BY created DESC
       });
 
       if (!jiraResp.ok) {
-        await slack.chat.postMessage({
-          channel: ev.channel,
-          thread_ts: ev.ts,
-          text: `Error consultando Jira (${jiraResp.status})`,
-        });
-        return;
-      }
+  const errText = await jiraResp.text();
+  await slack.chat.postMessage({
+    channel: ev.channel,
+    thread_ts: ev.ts,
+    text: `Error consultando Jira (${jiraResp.status})\n${errText}`.slice(0, 2900),
+  });
+  return;
+}
+
 
       const data = await jiraResp.json();
       const issues = data.issues || [];
