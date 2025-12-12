@@ -112,7 +112,7 @@ ORDER BY created DESC
     `.trim();
 
     const searchUrl =
-      `${JIRA_BASE_URL}/rest/api/3/search` +
+      `${JIRA_BASE_URL}/rest/api/3/search/jql` +
       `?jql=${encodeURIComponent(jql)}` +
       `&fields=summary,issuetype,status` +
       `&maxResults=50`;
