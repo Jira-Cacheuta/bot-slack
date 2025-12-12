@@ -57,46 +57,50 @@ function jiraAuthHeader() {
   return `Basic ${token}`;
 }
 
+// ───────── Healthcheck ─────────
+app.get("/", (_req, res) => {
+  res.status(200).send("ok");
+});
+
 // ───────── Slack Events Endpoint ─────────
 app.post(
   "/slack/events",
   express.raw({ type: "application/json" }),
   async (req, res) => {
+    let payload;
+
+    // 1️⃣ Parse JSON primero
     try {
-      if (!verifySlackSignature(req)) {
-        return res.status(401).send("invalid signature");
-      }
+      payload = JSON.parse(req.body.toString("utf8"));
+    } catch {
+      return res.status(400).send("bad json");
+    }
 
-      const payload = JSON.parse(req.body.toString("utf8"));
+    // 2️⃣ URL verification (ANTES de validar firma)
+    if (payload.type === "url_verification") {
+      return res.status(200).send(payload.challenge);
+    }
 
-      // URL verification
-      if (payload.type === "url_verification") {
-        return res.status(200).send(payload.challenge);
-      }
+    // 3️⃣ Validar firma para eventos reales
+    if (!verifySlackSignature(req)) {
+      return res.status(401).send("invalid signature");
+    }
 
-      // ACK inmediato
-      res.status(200).send("ok");
+    // 4️⃣ ACK inmediato
+    res.status(200).send("ok");
 
-      if (payload.type !== "event_callback") return;
+    if (payload.type !== "event_callback") return;
 
-      const ev = payload.event;
+    const ev = payload.event;
 
-      if (
-        !ev ||
-        ev.type !== "message" ||
-        ev.bot_id ||
-        ev.subtype
-      ) {
-        return;
-      }
+    if (!ev || ev.type !== "message" || ev.bot_id || ev.subtype) return;
+    if (!ALLOWED_CHANNELS.has(ev.channel)) return;
 
-      if (!ALLOWED_CHANNELS.has(ev.channel)) return;
+    const command = parseCommand(ev.text);
+    if (command !== "problemashoy") return;
 
-      const command = parseCommand(ev.text);
-      if (command !== "problemashoy") return;
-
-      // ───────── JQL ─────────
-      const jql = `
+    // ───────── JQL ─────────
+    const jql = `
 issuetype in (
   "Problema Eléctrico",
   "Problema Mantenimiento",
@@ -105,14 +109,15 @@ issuetype in (
 )
 AND created >= startOfDay()
 ORDER BY created DESC
-      `.trim();
+    `.trim();
 
-      const searchUrl =
-        `${JIRA_BASE_URL}/rest/api/3/search` +
-        `?jql=${encodeURIComponent(jql)}` +
-        `&fields=summary,issuetype,status` +
-        `&maxResults=50`;
+    const searchUrl =
+      `${JIRA_BASE_URL}/rest/api/3/search` +
+      `?jql=${encodeURIComponent(jql)}` +
+      `&fields=summary,issuetype,status` +
+      `&maxResults=50`;
 
+    try {
       const jiraResp = await fetch(searchUrl, {
         headers: {
           Authorization: jiraAuthHeader(),
@@ -156,7 +161,7 @@ ORDER BY created DESC
         text,
       });
     } catch (err) {
-      console.error("Slack handler error:", err);
+      console.error("Error ejecutando comando:", err);
     }
   }
 );
