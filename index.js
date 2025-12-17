@@ -253,11 +253,11 @@ app.post(
       }
 
       if (command === "/problemasultimos30d") {
-      const data = await jiraSearch(JQL_P, 50);
+      const data = await jiraSearch(JQL_PROBLEMAS_30D, 50);
       const issues = data.issues || [];
-      const header = `*Detalles pendientes de los últimos 30 días* — Total: *${issues.length}*`;
+      const header = `*Problemas pendientes de los últimos 30 días* — Total: *${issues.length}*`;
       const lines = issues.slice(0, 25).map(formatIssueLine);
-      const body = lines.length ? lines.join("\n") : "• Sin detalles pendientes.";
+      const body = lines.length ? lines.join("\n") : "• Sin problemas pendientes.";
       await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
       return;
       }
