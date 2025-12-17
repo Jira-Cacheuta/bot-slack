@@ -53,6 +53,14 @@ AND created >= startOfDay()
 ORDER BY created DESC
 `.trim();
 
+const JQL_ASISTENCIA_MANANA = `
+project = RH
+AND issuetype = "Asistencia"
+AND "due" >= startOfDay("+1d")
+AND "due" <  startOfDay("+2d")
+ORDER BY "due" ASC
+`.trim();
+
 // ───────── Helpers ─────────
 function verifySlackSignature(req) {
   const timestamp = req.headers["x-slack-request-timestamp"];
@@ -120,6 +128,8 @@ function buildCommandsHelp(hashOrSlash = "#") {
     `• \`${prefix}problemashoy\` — Problemas creados hoy (Jira).`,
     `• \`${prefix}detalleshoy\` — Detalles creados hoy (Jira).`,
     `• \`${prefix}comandos\` — Lista de comandos.`,
+    `• \`${prefix}asistenciamañana\` — Asistencias de mañana (Jira).`,
+
   ].join("\n");
 }
 
@@ -302,6 +312,16 @@ app.post(
         const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
         await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
         return;
+      }
+
+      if (command === "/asistenciamañana") {
+      const data = await jiraSearch(JQL_ASISTENCIA_MANANA, 50);
+      const issues = data.issues || [];
+      const header = `*Asistencias de mañana* — Total: *${issues.length}*`;
+      const lines = issues.slice(0, 25).map(formatIssueLine);
+      const body = lines.length ? lines.join("\n") : "• Sin resultados para mañana.";
+      await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+      return;
       }
 
       await respondInChannelViaResponseUrl(
