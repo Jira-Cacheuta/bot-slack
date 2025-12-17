@@ -61,6 +61,19 @@ AND due <  startOfDay("+2d")
 ORDER BY due ASC, created ASC
 `.trim();
 
+const JQL_DETALLES_30D = `
+project = DET
+and issuetype in ("Detalle Electricidad", "Detalle Infraestructura", "Detalle Jardinería", "Detalle Mantenimiento")
+and statusCategory in ("To Do", "In Progress")
+and created >= startOfDay("-30d")
+ORDER BY created ASC
+`.trim();
+
+const JQL_PROBLEMAS_30D = `
+project = PROB AND issuetype in ("Problema Eléctrico", "Problema Hidraulico", "Problema Infraestructura","Problema Jardinería","Problema Mantenimiento") and statusCategory in ("To Do", "In Progress")
+and created >= startOfDay("-30d")
+ORDER BY created ASC
+`.trim();
 
 // ───────── Helpers ─────────
 function verifySlackSignature(req) {
@@ -129,8 +142,9 @@ function buildCommandsHelp(hashOrSlash = "#") {
     `• \`${prefix}problemashoy\` — Problemas creados hoy (Jira).`,
     `• \`${prefix}detalleshoy\` — Detalles creados hoy (Jira).`,
     `• \`${prefix}comandos\` — Lista de comandos.`,
-    `• \`${prefix}asistenciamanana\` — Asistencias de manana (Jira).`,
-
+    `• \`${prefix}asistenciamanana\` — Asistencias de mañana (Jira).`,
+    `• \`${prefix}detallesultimos30d\` — Detalles pendientes de los ultimos 30 días (Jira).`,
+    `• \`${prefix}problemasultimos30d\` — Problemas pendientes de los ultimos 30 días (Jira).`,
   ].join("\n");
 }
 
@@ -158,103 +172,6 @@ async function respondInChannelViaResponseUrl(responseUrl, text) {
 // ───────── Healthcheck ─────────
 app.get("/", (_req, res) => res.status(200).send("ok"));
 
-/**
- * ─────────────────────────────────────────────────────────────
- * 1) EVENTS API (hashtags): POST /slack/events
- *    #problemashoy / #detalleshoy / #comandos
- * ─────────────────────────────────────────────────────────────
- */
-app.post(
-  "/slack/events",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    let payload;
-
-    // Parse JSON primero
-    try {
-      payload = JSON.parse(req.body.toString("utf8"));
-    } catch {
-      return res.status(400).send("bad json");
-    }
-
-    // Challenge primero
-    if (payload.type === "url_verification") {
-      return res.status(200).send(payload.challenge);
-    }
-
-    // Firma para eventos reales
-    if (!verifySlackSignature(req)) {
-      return res.status(401).send("invalid signature");
-    }
-
-    // ACK inmediato
-    res.status(200).send("ok");
-
-    if (payload.type !== "event_callback") return;
-
-    const ev = payload.event;
-    if (!ev || ev.type !== "message" || ev.bot_id || ev.subtype) return;
-    if (!ALLOWED_CHANNELS.has(ev.channel)) return;
-
-    const cmd = parseHashCommand(ev.text);
-    if (!cmd) return;
-
-    const thread_ts = ev.ts;
-
-    try {
-      if (cmd === "comandos") {
-        await slack.chat.postMessage({
-          channel: ev.channel,
-          thread_ts,
-          text: buildCommandsHelp("#"),
-        });
-        return;
-      }
-
-      if (cmd === "problemashoy") {
-        const data = await jiraSearch(JQL_PROBLEMAS_HOY, 50);
-        const issues = data.issues || [];
-        const header = `*Problemas de hoy* — Total: *${issues.length}*`;
-        const lines = issues.slice(0, 25).map(formatIssueLine);
-        const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
-
-        await slack.chat.postMessage({
-          channel: ev.channel,
-          thread_ts,
-          text: `${header}\n${body}`.slice(0, 3800),
-        });
-        return;
-      }
-
-      if (cmd === "detalleshoy") {
-        const data = await jiraSearch(JQL_DETALLES_HOY, 50);
-        const issues = data.issues || [];
-        const header = `*Detalles de hoy* — Total: *${issues.length}*`;
-        const lines = issues.slice(0, 25).map(formatIssueLine);
-        const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
-
-        await slack.chat.postMessage({
-          channel: ev.channel,
-          thread_ts,
-          text: `${header}\n${body}`.slice(0, 3800),
-        });
-        return;
-      }
-
-      await slack.chat.postMessage({
-        channel: ev.channel,
-        thread_ts,
-        text: "Comando no reconocido. Escribí #comandos para ver la lista.",
-      });
-    } catch (err) {
-      await slack.chat.postMessage({
-        channel: ev.channel,
-        thread_ts,
-        text: `Error: ${err.message}`.slice(0, 3800),
-      });
-    }
-  }
-);
 
 /**
  * ─────────────────────────────────────────────────────────────
@@ -321,6 +238,26 @@ app.post(
       const header = `*Asistencias de mañana* — Total: *${issues.length}*`;
       const lines = issues.slice(0, 25).map(formatIssueLine);
       const body = lines.length ? lines.join("\n") : "• Sin resultados para mañana.";
+      await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+      return;
+      }
+      
+      if (command === "/detallesultimos30d") {
+      const data = await jiraSearch(JQL_DETALLES_30D, 50);
+      const issues = data.issues || [];
+      const header = `*Detalles pendientes de los últimos 30 días* — Total: *${issues.length}*`;
+      const lines = issues.slice(0, 25).map(formatIssueLine);
+      const body = lines.length ? lines.join("\n") : "• Sin detalles pendientes.";
+      await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+      return;
+      }
+
+      if (command === "/problemasultimos30d") {
+      const data = await jiraSearch(JQL_P, 50);
+      const issues = data.issues || [];
+      const header = `*Detalles pendientes de los últimos 30 días* — Total: *${issues.length}*`;
+      const lines = issues.slice(0, 25).map(formatIssueLine);
+      const body = lines.length ? lines.join("\n") : "• Sin detalles pendientes.";
       await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
       return;
       }
