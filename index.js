@@ -14,8 +14,13 @@ const JIRA_BASE_URL = (process.env.JIRA_BASE_URL || "").replace(/\/+$/, "");
 const JIRA_EMAIL = process.env.JIRA_EMAIL;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
 
-// Canal habilitado
-const ALLOWED_CHANNELS = new Set(["C099W0T9R2P"]);
+// Canales habilitados (coma-separados) — si no se setea, usa el tuyo
+const ALLOWED_CHANNELS = new Set(
+  (process.env.ALLOWED_CHANNELS || "C099W0T9R2P")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
 
 if (!SLACK_SIGNING_SECRET) throw new Error("Missing SLACK_SIGNING_SECRET");
 if (!SLACK_BOT_TOKEN) throw new Error("Missing SLACK_BOT_TOKEN");
@@ -25,12 +30,36 @@ if (!JIRA_API_TOKEN) throw new Error("Missing JIRA_API_TOKEN");
 
 const slack = new WebClient(SLACK_BOT_TOKEN);
 
+// ───────── JQLs ─────────
+const JQL_PROBLEMAS_HOY = `
+issuetype in (
+  "Problema Eléctrico",
+  "Problema Mantenimiento",
+  "Problema Jardinería",
+  "Problema Infraestructura"
+)
+AND created >= startOfDay()
+ORDER BY created DESC
+`.trim();
+
+const JQL_DETALLES_HOY = `
+issuetype in (
+  "Detalle Eléctrico",
+  "Detalle Mantenimiento",
+  "Detalle Jardinería",
+  "Detalle Infraestructura"
+)
+AND created >= startOfDay()
+ORDER BY created DESC
+`.trim();
+
 // ───────── Helpers ─────────
 function verifySlackSignature(req) {
   const timestamp = req.headers["x-slack-request-timestamp"];
   const signature = req.headers["x-slack-signature"];
   if (!timestamp || !signature) return false;
 
+  // Anti-replay (5 min)
   const now = Math.floor(Date.now() / 1000);
   if (Math.abs(now - Number(timestamp)) > 60 * 5) return false;
 
@@ -62,13 +91,14 @@ function jiraAuthHeader() {
 }
 
 async function jiraSearch(jql, maxResults = 50) {
-  const searchUrl =
+  // Tu Jira exige este endpoint
+  const url =
     `${JIRA_BASE_URL}/rest/api/3/search/jql` +
     `?jql=${encodeURIComponent(jql)}` +
     `&fields=${encodeURIComponent("summary,issuetype,status")}` +
     `&maxResults=${encodeURIComponent(String(maxResults))}`;
 
-  const resp = await fetch(searchUrl, {
+  const resp = await fetch(url, {
     method: "GET",
     headers: {
       Authorization: jiraAuthHeader(),
@@ -83,12 +113,13 @@ async function jiraSearch(jql, maxResults = 50) {
   return JSON.parse(bodyText);
 }
 
-function buildCommandsHelp() {
+function buildCommandsHelp(hashOrSlash = "#") {
+  const prefix = hashOrSlash;
   return [
     "*Comandos disponibles:*",
-    "• `#problemashoy` — Problemas creados hoy (Jira).",
-    "• `#detalleshoy` — Detalles creados hoy (Jira).",
-    "• `#comandos` — Lista de comandos.",
+    `• \`${prefix}problemashoy\` — Problemas creados hoy (Jira).`,
+    `• \`${prefix}detalleshoy\` — Detalles creados hoy (Jira).`,
+    `• \`${prefix}comandos\` — Lista de comandos.`,
   ].join("\n");
 }
 
@@ -102,10 +133,26 @@ function formatIssueLine(issue) {
   return `• <${url}|${key}> — *${type}* — ${status} — ${summary}`;
 }
 
+async function respondInChannelViaResponseUrl(responseUrl, text) {
+  await fetch(responseUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      response_type: "in_channel",
+      text: (text || "").slice(0, 3800),
+    }),
+  });
+}
+
 // ───────── Healthcheck ─────────
 app.get("/", (_req, res) => res.status(200).send("ok"));
 
-// ───────── Slack Events Endpoint ─────────
+/**
+ * ─────────────────────────────────────────────────────────────
+ * 1) EVENTS API (hashtags): POST /slack/events
+ *    #problemashoy / #detalleshoy / #comandos
+ * ─────────────────────────────────────────────────────────────
+ */
 app.post(
   "/slack/events",
   express.raw({ type: "application/json" }),
@@ -119,7 +166,7 @@ app.post(
       return res.status(400).send("bad json");
     }
 
-    // URL verification (challenge) primero
+    // Challenge primero
     if (payload.type === "url_verification") {
       return res.status(200).send(payload.challenge);
     }
@@ -135,111 +182,140 @@ app.post(
     if (payload.type !== "event_callback") return;
 
     const ev = payload.event;
-
-    // Solo mensajes “normales”
     if (!ev || ev.type !== "message" || ev.bot_id || ev.subtype) return;
-
-    // Canal permitido
     if (!ALLOWED_CHANNELS.has(ev.channel)) return;
 
     const cmd = parseHashCommand(ev.text);
     if (!cmd) return;
 
-    // Responder siempre en thread
     const thread_ts = ev.ts;
 
-    // ───────── #comandos ─────────
-    if (cmd === "comandos") {
+    try {
+      if (cmd === "comandos") {
+        await slack.chat.postMessage({
+          channel: ev.channel,
+          thread_ts,
+          text: buildCommandsHelp("#"),
+        });
+        return;
+      }
+
+      if (cmd === "problemashoy") {
+        const data = await jiraSearch(JQL_PROBLEMAS_HOY, 50);
+        const issues = data.issues || [];
+        const header = `*Problemas de hoy* — Total: *${issues.length}*`;
+        const lines = issues.slice(0, 25).map(formatIssueLine);
+        const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
+
+        await slack.chat.postMessage({
+          channel: ev.channel,
+          thread_ts,
+          text: `${header}\n${body}`.slice(0, 3800),
+        });
+        return;
+      }
+
+      if (cmd === "detalleshoy") {
+        const data = await jiraSearch(JQL_DETALLES_HOY, 50);
+        const issues = data.issues || [];
+        const header = `*Detalles de hoy* — Total: *${issues.length}*`;
+        const lines = issues.slice(0, 25).map(formatIssueLine);
+        const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
+
+        await slack.chat.postMessage({
+          channel: ev.channel,
+          thread_ts,
+          text: `${header}\n${body}`.slice(0, 3800),
+        });
+        return;
+      }
+
       await slack.chat.postMessage({
         channel: ev.channel,
         thread_ts,
-        text: buildCommandsHelp(),
+        text: "Comando no reconocido. Escribí #comandos para ver la lista.",
       });
-      return;
+    } catch (err) {
+      await slack.chat.postMessage({
+        channel: ev.channel,
+        thread_ts,
+        text: `Error: ${err.message}`.slice(0, 3800),
+      });
     }
+  }
+);
 
-    // ───────── #problemashoy ─────────
-    if (cmd === "problemashoy") {
-      const jqlProblemas = `
-issuetype in (
-  "Problema Eléctrico",
-  "Problema Mantenimiento",
-  "Problema Jardinería",
-  "Problema Infraestructura"
-)
-AND created >= startOfDay()
-ORDER BY created DESC
-      `.trim();
+/**
+ * ─────────────────────────────────────────────────────────────
+ * 2) SLASH COMMANDS: POST /slack/commands
+ *    /problemashoy / /detalleshoy / /comandos
+ *    TODO in_channel (público)
+ * ─────────────────────────────────────────────────────────────
+ */
+app.post(
+  "/slack/commands",
+  express.raw({ type: "application/x-www-form-urlencoded" }),
+  async (req, res) => {
+    try {
+      if (!verifySlackSignature(req)) {
+        return res.status(401).send("invalid signature");
+      }
 
-      try {
-        const data = await jiraSearch(jqlProblemas, 50);
-        const issues = data.issues || [];
+      const params = new URLSearchParams(req.body.toString("utf8"));
+      const command = (params.get("command") || "").trim(); // "/problemashoy"
+      const channelId = (params.get("channel_id") || "").trim();
+      const responseUrl = params.get("response_url");
 
-        const today = new Date().toLocaleDateString("es-AR");
-        const header = `*Problemas de hoy* (${today}) — Total: *${issues.length}*`;
-
-        const lines = issues.slice(0, 25).map(formatIssueLine);
-        const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
-
-        await slack.chat.postMessage({
-          channel: ev.channel,
-          thread_ts,
-          text: `${header}\n${body}`.slice(0, 3800),
-        });
-      } catch (err) {
-        await slack.chat.postMessage({
-          channel: ev.channel,
-          thread_ts,
-          text: `Error consultando Jira: ${err.message}`.slice(0, 3800),
+      if (!responseUrl) return res.status(400).send("missing response_url");
+      if (!ALLOWED_CHANNELS.has(channelId)) {
+        // Aunque pediste todo in_channel, esto conviene dejarlo como respuesta directa.
+        return res.status(200).json({
+          response_type: "ephemeral",
+          text: "Este comando no está habilitado en este canal.",
         });
       }
-      return;
-    }
 
-    // ───────── #detalleshoy ─────────
-    if (cmd === "detalleshoy") {
-      const jqlDetalles = `
-issuetype in (
-  "Detalle Eléctricidad",
-  "Detalle Mantenimiento",
-  "Detalle Jardinería",
-  "Detalle Infraestructura"
-)
-AND created >= startOfDay()
-ORDER BY created DESC
-      `.trim();
+      // ACK rápido (no publica nada todavía)
+      res.status(200).send("");
 
-      try {
-        const data = await jiraSearch(jqlDetalles, 50);
+      // Ejecutar y responder por response_url (in_channel)
+      if (command === "/comandos") {
+        await respondInChannelViaResponseUrl(responseUrl, buildCommandsHelp("/"));
+        return;
+      }
+
+      if (command === "/problemashoy") {
+        const data = await jiraSearch(JQL_PROBLEMAS_HOY, 50);
         const issues = data.issues || [];
-
-        const today = new Date().toLocaleDateString("es-AR");
-        const header = `*Detalles de hoy* (${today}) — Total: *${issues.length}*`;
-
+        const header = `*Problemas de hoy* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
-
-        await slack.chat.postMessage({
-          channel: ev.channel,
-          thread_ts,
-          text: `${header}\n${body}`.slice(0, 3800),
-        });
-      } catch (err) {
-        await slack.chat.postMessage({
-          channel: ev.channel,
-          thread_ts,
-          text: `Error consultando Jira: ${err.message}`.slice(0, 3800),
-        });
+        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        return;
       }
-      return;
-    }
 
-    // Comando no reconocido (si alguien escribe otro #...)
-    await slack.chat.postMessage({
-      channel: ev.channel,
-      thread_ts,
-      text: `Comando no reconocido. Escribí #comandos para ver la lista.`,
-    });
+      if (command === "/detalleshoy") {
+        const data = await jiraSearch(JQL_DETALLES_HOY, 50);
+        const issues = data.issues || [];
+        const header = `*Detalles de hoy* — Total: *${issues.length}*`;
+        const lines = issues.slice(0, 25).map(formatIssueLine);
+        const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
+        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        return;
+      }
+
+      await respondInChannelViaResponseUrl(
+        responseUrl,
+        `Comando no reconocido: ${command}\n\n${buildCommandsHelp("/")}`
+      );
+    } catch (err) {
+      console.error("Slash command handler error:", err);
+      try {
+        return res.status(500).send("server error");
+      } catch {
+        // ignore
+      }
+    }
   }
 );
 
