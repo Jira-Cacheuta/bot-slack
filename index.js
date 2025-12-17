@@ -55,11 +55,12 @@ ORDER BY created DESC
 
 const JQL_ASISTENCIA_MANANA = `
 project = RH
-AND issuetype = "Asistencia"
-AND "due" >= startOfDay("+1d")
-AND "due" <  startOfDay("+2d")
-ORDER BY "due" ASC
+AND issuetype = "recurso humano"
+AND due >= startOfDay("+1d")
+AND due <  startOfDay("+2d")
+ORDER BY due ASC, created ASC
 `.trim();
+
 
 // ───────── Helpers ─────────
 function verifySlackSignature(req) {
@@ -128,7 +129,7 @@ function buildCommandsHelp(hashOrSlash = "#") {
     `• \`${prefix}problemashoy\` — Problemas creados hoy (Jira).`,
     `• \`${prefix}detalleshoy\` — Detalles creados hoy (Jira).`,
     `• \`${prefix}comandos\` — Lista de comandos.`,
-    `• \`${prefix}asistenciamañana\` — Asistencias de mañana (Jira).`,
+    `• \`${prefix}asistenciamanana\` — Asistencias de manana (Jira).`,
 
   ].join("\n");
 }
@@ -314,7 +315,7 @@ app.post(
         return;
       }
 
-      if (command === "/asistenciamañana") {
+      if (command === "/asistenciamanana") {
       const data = await jiraSearch(JQL_ASISTENCIA_MANANA, 50);
       const issues = data.issues || [];
       const header = `*Asistencias de mañana* — Total: *${issues.length}*`;
