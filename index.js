@@ -139,9 +139,9 @@ function buildCommandsHelp(hashOrSlash = "#") {
   const prefix = hashOrSlash;
   return [
     "*Comandos disponibles:*",
+    `• \`${prefix}comandos\` — Lista de comandos.`,
     `• \`${prefix}problemashoy\` — Problemas creados hoy (Jira).`,
     `• \`${prefix}detalleshoy\` — Detalles creados hoy (Jira).`,
-    `• \`${prefix}comandos\` — Lista de comandos.`,
     `• \`${prefix}asistenciamanana\` — Asistencias de mañana (Jira).`,
     `• \`${prefix}detallesultimos30d\` — Detalles pendientes de los ultimos 30 días (Jira).`,
     `• \`${prefix}problemasultimos30d\` — Problemas pendientes de los ultimos 30 días (Jira).`,
