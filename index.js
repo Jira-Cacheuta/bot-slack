@@ -101,12 +101,6 @@ function verifySlackSignature(req) {
   }
 }
 
-function parseHashCommand(text) {
-  if (!text) return null;
-  const match = text.match(/(^|\s)#([a-zA-Z0-9_]+)/);
-  return match ? match[2].toLowerCase() : null;
-}
-
 function jiraAuthHeader() {
   const token = Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString("base64");
   return `Basic ${token}`;
@@ -176,12 +170,13 @@ async function respondInChannelViaResponseUrl(responseUrl, text) {
 }
 
 // ───────── Healthcheck ─────────
-app.get("/", (_req, res) => res.status(200).send("ok"));
-
 app.use((req, _res, next) => {
   console.log(`[HTTP] ${req.method} ${req.path}`);
   next();
 });
+
+app.get("/", (_req, res) => res.status(200).send("ok"));
+
 
 /**
  * ─────────────────────────────────────────────────────────────
