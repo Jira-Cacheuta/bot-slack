@@ -113,12 +113,13 @@ function jiraAuthHeader() {
 }
 
 async function jiraSearch(jql, maxResults = 50) {
-  // Tu Jira exige este endpoint
   const url =
     `${JIRA_BASE_URL}/rest/api/3/search/jql` +
     `?jql=${encodeURIComponent(jql)}` +
     `&fields=${encodeURIComponent("summary,issuetype,status")}` +
     `&maxResults=${encodeURIComponent(String(maxResults))}`;
+
+  console.log(`[JIRA] GET /search/jql maxResults=${maxResults}`);
 
   const resp = await fetch(url, {
     method: "GET",
@@ -129,11 +130,16 @@ async function jiraSearch(jql, maxResults = 50) {
   });
 
   const bodyText = await resp.text();
+
   if (!resp.ok) {
+    console.log(`[JIRA] ERROR status=${resp.status} body=${bodyText.slice(0, 500)}`);
     throw new Error(`Jira (${resp.status}): ${bodyText}`);
   }
+
+  console.log(`[JIRA] OK status=${resp.status} bytes=${bodyText.length}`);
   return JSON.parse(bodyText);
 }
+
 
 function buildCommandsHelp(hashOrSlash = "#") {
   const prefix = hashOrSlash;
@@ -172,6 +178,10 @@ async function respondInChannelViaResponseUrl(responseUrl, text) {
 // ───────── Healthcheck ─────────
 app.get("/", (_req, res) => res.status(200).send("ok"));
 
+app.use((req, _res, next) => {
+  console.log(`[HTTP] ${req.method} ${req.path}`);
+  next();
+});
 
 /**
  * ─────────────────────────────────────────────────────────────
@@ -184,31 +194,50 @@ app.post(
   "/slack/commands",
   express.raw({ type: "application/x-www-form-urlencoded" }),
   async (req, res) => {
+    const reqId = crypto.randomUUID?.() || String(Date.now());
+    const started = Date.now();
+
     try {
+      console.log(`[SLASH][${reqId}] Incoming request`);
+
       if (!verifySlackSignature(req)) {
+        console.log(`[SLASH][${reqId}] invalid signature`);
         return res.status(401).send("invalid signature");
       }
 
       const params = new URLSearchParams(req.body.toString("utf8"));
-      const command = (params.get("command") || "").trim(); // "/problemashoy"
+      const command = (params.get("command") || "").trim();
       const channelId = (params.get("channel_id") || "").trim();
+      const userId = (params.get("user_id") || "").trim();
       const responseUrl = params.get("response_url");
 
-      if (!responseUrl) return res.status(400).send("missing response_url");
+      console.log(
+        `[SLASH][${reqId}] command=${command} channel=${channelId} user=${userId}`
+      );
+
+      if (!responseUrl) {
+        console.log(`[SLASH][${reqId}] missing response_url`);
+        return res.status(400).send("missing response_url");
+      }
+
       if (!ALLOWED_CHANNELS.has(channelId)) {
-        // Aunque pediste todo in_channel, esto conviene dejarlo como respuesta directa.
+        console.log(`[SLASH][${reqId}] channel not allowed`);
         return res.status(200).json({
           response_type: "ephemeral",
           text: "Este comando no está habilitado en este canal.",
         });
       }
 
-      // ACK rápido (no publica nada todavía)
+      // ACK rápido
       res.status(200).send("");
+      console.log(
+        `[SLASH][${reqId}] ack sent in ${Date.now() - started}ms`
+      );
 
       // Ejecutar y responder por response_url (in_channel)
       if (command === "/comandos") {
         await respondInChannelViaResponseUrl(responseUrl, buildCommandsHelp("/"));
+        console.log(`[SLASH][${reqId}] responded /comandos`);
         return;
       }
 
@@ -219,6 +248,7 @@ app.post(
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
         await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        console.log(`[SLASH][${reqId}] responded /problemashoy count=${issues.length}`);
         return;
       }
 
@@ -229,45 +259,50 @@ app.post(
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
         await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        console.log(`[SLASH][${reqId}] responded /detalleshoy count=${issues.length}`);
         return;
       }
 
       if (command === "/asistenciamanana") {
-      const data = await jiraSearch(JQL_ASISTENCIA_MANANA, 50);
-      const issues = data.issues || [];
-      const header = `*Asistencias de mañana* — Total: *${issues.length}*`;
-      const lines = issues.slice(0, 25).map(formatIssueLine);
-      const body = lines.length ? lines.join("\n") : "• Sin resultados para mañana.";
-      await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
-      return;
+        const data = await jiraSearch(JQL_ASISTENCIA_MANANA, 50);
+        const issues = data.issues || [];
+        const header = `*Asistencias de mañana* — Total: *${issues.length}*`;
+        const lines = issues.slice(0, 25).map(formatIssueLine);
+        const body = lines.length ? lines.join("\n") : "• Sin resultados para mañana.";
+        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        console.log(`[SLASH][${reqId}] responded /asistenciamanana count=${issues.length}`);
+        return;
       }
-      
+
       if (command === "/detallesultimos30d") {
-      const data = await jiraSearch(JQL_DETALLES_30D, 50);
-      const issues = data.issues || [];
-      const header = `*Detalles pendientes de los últimos 30 días* — Total: *${issues.length}*`;
-      const lines = issues.slice(0, 25).map(formatIssueLine);
-      const body = lines.length ? lines.join("\n") : "• Sin detalles pendientes.";
-      await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
-      return;
+        const data = await jiraSearch(JQL_DETALLES_30D, 50);
+        const issues = data.issues || [];
+        const header = `*Detalles pendientes de los últimos 30 días* — Total: *${issues.length}*`;
+        const lines = issues.slice(0, 25).map(formatIssueLine);
+        const body = lines.length ? lines.join("\n") : "• Sin detalles pendientes.";
+        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        console.log(`[SLASH][${reqId}] responded /detallesultimos30d count=${issues.length}`);
+        return;
       }
 
       if (command === "/problemasultimos30d") {
-      const data = await jiraSearch(JQL_PROBLEMAS_30D, 50);
-      const issues = data.issues || [];
-      const header = `*Problemas pendientes de los últimos 30 días* — Total: *${issues.length}*`;
-      const lines = issues.slice(0, 25).map(formatIssueLine);
-      const body = lines.length ? lines.join("\n") : "• Sin problemas pendientes.";
-      await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
-      return;
+        const data = await jiraSearch(JQL_PROBLEMAS_30D, 50);
+        const issues = data.issues || [];
+        const header = `*Problemas pendientes de los últimos 30 días* — Total: *${issues.length}*`;
+        const lines = issues.slice(0, 25).map(formatIssueLine);
+        const body = lines.length ? lines.join("\n") : "• Sin problemas pendientes.";
+        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        console.log(`[SLASH][${reqId}] responded /problemasultimos30d count=${issues.length}`);
+        return;
       }
 
       await respondInChannelViaResponseUrl(
         responseUrl,
         `Comando no reconocido: ${command}\n\n${buildCommandsHelp("/")}`
       );
+      console.log(`[SLASH][${reqId}] responded unknown command`);
     } catch (err) {
-      console.error("Slash command handler error:", err);
+      console.error(`[SLASH][${reqId}] ERROR`, err);
       try {
         return res.status(500).send("server error");
       } catch {
