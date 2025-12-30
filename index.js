@@ -283,8 +283,6 @@ app.post(
       // ───────── /sistema_hidraulico (DM + PDF privado + lista links) ─────────
 if (command === "/sistema_hidraulico") {
   const systemName = "Sistema hidráulico";
-  const systemLink =
-    process.env.SISTEMA_HIDRAULICO_URL || "https://cacheuta.atlassian.net/browse/CH-741";
 
   const sistemas = [
     { name: "Sistema Gruta N1", url: "https://cacheuta.atlassian.net/browse/CH-1" },
@@ -329,8 +327,6 @@ if (command === "/sistema_hidraulico") {
     channel: dmChannelId,
     text:
       `*${systemName}*\n` +
-      `• Link principal: <${systemLink}|${systemName}>\n` +
-      `• PDF adjunto en este chat.\n\n` +
       linksText,
   });
 
