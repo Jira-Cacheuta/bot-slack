@@ -153,7 +153,7 @@ function buildCommandsHelp(prefix = "/") {
     `• \`${prefix}asistenciamanana\` — Asistencias de mañana (Jira).`,
     `• \`${prefix}detallesultimos30d\` — Detalles pendientes de los ultimos 30 días (Jira).`,
     `• \`${prefix}problemasultimos30d\` — Problemas pendientes de los ultimos 30 días (Jira).`,
-    `• \`${prefix}sistema_hidraulico\` — Envía PDF + link por DM.`,
+    `• \`${prefix}sistema_hidraulico\` — Envía PDF + link de los sistemas por DM.`,
   ].join("\n");
 }
 
