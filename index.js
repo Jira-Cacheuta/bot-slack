@@ -3,6 +3,14 @@ import crypto from "crypto";
 import { WebClient } from "@slack/web-api";
 import "dotenv/config";
 
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// ───────── Node ESM paths ─────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 // ───────── Config ─────────
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -70,7 +78,9 @@ ORDER BY created ASC
 `.trim();
 
 const JQL_PROBLEMAS_30D = `
-project = PROB AND issuetype in ("Problema Eléctrico", "Problema Hidraulico", "Problema Infraestructura","Problema Jardinería","Problema Mantenimiento") and statusCategory in ("To Do", "In Progress")
+project = PROB
+and issuetype in ("Problema Eléctrico", "Problema Hidraulico", "Problema Infraestructura","Problema Jardinería","Problema Mantenimiento")
+and statusCategory in ("To Do", "In Progress")
 and created >= startOfDay("-30d")
 ORDER BY created ASC
 `.trim();
@@ -134,9 +144,7 @@ async function jiraSearch(jql, maxResults = 50) {
   return JSON.parse(bodyText);
 }
 
-
-function buildCommandsHelp(hashOrSlash = "#") {
-  const prefix = hashOrSlash;
+function buildCommandsHelp(prefix = "/") {
   return [
     "*Comandos disponibles:*",
     `• \`${prefix}comandos\` — Lista de comandos.`,
@@ -145,6 +153,7 @@ function buildCommandsHelp(hashOrSlash = "#") {
     `• \`${prefix}asistenciamanana\` — Asistencias de mañana (Jira).`,
     `• \`${prefix}detallesultimos30d\` — Detalles pendientes de los ultimos 30 días (Jira).`,
     `• \`${prefix}problemasultimos30d\` — Problemas pendientes de los ultimos 30 días (Jira).`,
+    `• \`${prefix}sistema_hidraulico\` — Envía PDF + link por DM.`,
   ].join("\n");
 }
 
@@ -158,31 +167,69 @@ function formatIssueLine(issue) {
   return `• <${url}|${key}> — *${type}* — ${status} — ${summary}`;
 }
 
-async function respondInChannelViaResponseUrl(responseUrl, text) {
+async function respondViaResponseUrl(responseUrl, text, responseType = "ephemeral") {
   await fetch(responseUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      response_type: "in_channel",
+      response_type: responseType,
       text: (text || "").slice(0, 3800),
     }),
   });
 }
 
+async function openDmChannel(userId) {
+  // conversations.open requiere im:write
+  const r = await slack.conversations.open({ users: userId });
+  if (!r?.ok || !r.channel?.id) {
+    throw new Error(`No se pudo abrir DM con user=${userId}`);
+  }
+  return r.channel.id;
+}
+
+async function sendSistemaHidraulicoByDM({ userId, systemName, systemLink }) {
+  const dmChannelId = await openDmChannel(userId);
+
+  // 1) Subir PDF al DM (privado)
+  const pdfPath = path.join(__dirname, "diagrama_ch", "Diagrama_CH_final.pdf");
+  if (!fs.existsSync(pdfPath)) {
+    throw new Error(`No existe el PDF en ${pdfPath}`);
+  }
+  const fileBuffer = fs.readFileSync(pdfPath);
+
+  const upload = await slack.files.uploadV2({
+    channel_id: dmChannelId,
+    filename: "sistema_hidraulico.pdf",
+    title: systemName,
+    file: fileBuffer,
+  });
+
+  if (!upload?.ok) {
+    throw new Error("No se pudo subir el PDF al DM (files.uploadV2)");
+  }
+
+  // 2) Mensaje en DM con link “nombrado”
+  await slack.chat.postMessage({
+    channel: dmChannelId,
+    text: `*${systemName}*\n• Link: <${systemLink}|${systemName}>\n• PDF adjunto en este chat.`,
+  });
+
+  return { dmChannelId };
+}
+
 // ───────── Healthcheck ─────────
+app.get("/", (_req, res) => res.status(200).send("ok"));
+
+// Logger HTTP global (excepto / porque está arriba)
 app.use((req, _res, next) => {
   console.log(`[HTTP] ${req.method} ${req.path}`);
   next();
 });
 
-app.get("/", (_req, res) => res.status(200).send("ok"));
-
-
 /**
  * ─────────────────────────────────────────────────────────────
- * 2) SLASH COMMANDS: POST /slack/commands
- *    /problemashoy / /detalleshoy / /comandos
- *    TODO in_channel (público)
+ * SLASH COMMANDS: POST /slack/commands
+ * Respuesta por response_url (ephemeral)
  * ─────────────────────────────────────────────────────────────
  */
 app.post(
@@ -206,9 +253,7 @@ app.post(
       const userId = (params.get("user_id") || "").trim();
       const responseUrl = params.get("response_url");
 
-      console.log(
-        `[SLASH][${reqId}] command=${command} channel=${channelId} user=${userId}`
-      );
+      console.log(`[SLASH][${reqId}] command=${command} channel=${channelId} user=${userId}`);
 
       if (!responseUrl) {
         console.log(`[SLASH][${reqId}] missing response_url`);
@@ -225,79 +270,108 @@ app.post(
 
       // ACK rápido
       res.status(200).send("");
-      console.log(
-        `[SLASH][${reqId}] ack sent in ${Date.now() - started}ms`
-      );
+      console.log(`[SLASH][${reqId}] ack sent in ${Date.now() - started}ms`);
 
-      // Ejecutar y responder por response_url (in_channel)
+      // ───────── /comandos ─────────
       if (command === "/comandos") {
-        await respondInChannelViaResponseUrl(responseUrl, buildCommandsHelp("/"));
+        await respondViaResponseUrl(responseUrl, buildCommandsHelp("/"), "ephemeral");
         console.log(`[SLASH][${reqId}] responded /comandos`);
         return;
       }
 
+      // ───────── /sistema_hidraulico (DM + PDF privado) ─────────
+      if (command === "/sistema_hidraulico") {
+        const systemName = "Sistema hidráulico";
+        const systemLink =
+          process.env.SISTEMA_HIDRAULICO_URL || "https://cacheuta.atlassian.net/browse/CH-1";
+
+        // Enviar por DM
+        await sendSistemaHidraulicoByDM({ userId, systemName, systemLink });
+
+        // Confirmación ephemeral en el canal
+        await respondViaResponseUrl(
+          responseUrl,
+          `Listo. Te envié por privado el PDF y el link de *${systemName}*.`,
+          "ephemeral"
+        );
+
+        console.log(`[SLASH][${reqId}] responded /sistema_hidraulico (sent DM)`);
+        return;
+      }
+
+      // ───────── /problemashoy ─────────
       if (command === "/problemashoy") {
         const data = await jiraSearch(JQL_PROBLEMAS_HOY, 50);
         const issues = data.issues || [];
         const header = `*Problemas de hoy* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
-        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
         console.log(`[SLASH][${reqId}] responded /problemashoy count=${issues.length}`);
         return;
       }
 
+      // ───────── /detalleshoy ─────────
       if (command === "/detalleshoy") {
         const data = await jiraSearch(JQL_DETALLES_HOY, 50);
         const issues = data.issues || [];
         const header = `*Detalles de hoy* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
-        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
         console.log(`[SLASH][${reqId}] responded /detalleshoy count=${issues.length}`);
         return;
       }
 
+      // ───────── /asistenciamanana ─────────
       if (command === "/asistenciamanana") {
         const data = await jiraSearch(JQL_ASISTENCIA_MANANA, 50);
         const issues = data.issues || [];
         const header = `*Asistencias de mañana* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para mañana.";
-        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
         console.log(`[SLASH][${reqId}] responded /asistenciamanana count=${issues.length}`);
         return;
       }
 
+      // ───────── /detallesultimos30d ─────────
       if (command === "/detallesultimos30d") {
         const data = await jiraSearch(JQL_DETALLES_30D, 50);
         const issues = data.issues || [];
         const header = `*Detalles pendientes de los últimos 30 días* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin detalles pendientes.";
-        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
         console.log(`[SLASH][${reqId}] responded /detallesultimos30d count=${issues.length}`);
         return;
       }
 
+      // ───────── /problemasultimos30d ─────────
       if (command === "/problemasultimos30d") {
         const data = await jiraSearch(JQL_PROBLEMAS_30D, 50);
         const issues = data.issues || [];
         const header = `*Problemas pendientes de los últimos 30 días* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin problemas pendientes.";
-        await respondInChannelViaResponseUrl(responseUrl, `${header}\n${body}`);
+        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
         console.log(`[SLASH][${reqId}] responded /problemasultimos30d count=${issues.length}`);
         return;
       }
 
-      await respondInChannelViaResponseUrl(
+      // Fallback
+      await respondViaResponseUrl(
         responseUrl,
-        `Comando no reconocido: ${command}\n\n${buildCommandsHelp("/")}`
+        `Comando no reconocido: ${command}\n\n${buildCommandsHelp("/")}`,
+        "ephemeral"
       );
       console.log(`[SLASH][${reqId}] responded unknown command`);
     } catch (err) {
       console.error(`[SLASH][${reqId}] ERROR`, err);
+      // Como ya mandamos ACK rápido, lo más útil es intentar avisar por response_url si existe:
+      try {
+        // Intento best-effort: responder algo (si el error fue antes de tener responseUrl, no se puede)
+      } catch {}
       try {
         return res.status(500).send("server error");
       } catch {
