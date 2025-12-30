@@ -22,13 +22,9 @@ const JIRA_BASE_URL = (process.env.JIRA_BASE_URL || "").replace(/\/+$/, "");
 const JIRA_EMAIL = process.env.JIRA_EMAIL;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
 
-// Canales habilitados (coma-separados) — si no se setea, usa el tuyo
-const ALLOWED_CHANNELS = new Set(
-  (process.env.ALLOWED_CHANNELS || "C099W0T9R2P")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-);
+// Si querés mostrar un mini “Te lo mandé por DM” en el canal (ephemeral),
+// ponelo en true. Si querés CERO mensajes en canal, false.
+const ACK_IN_CHANNEL = (process.env.ACK_IN_CHANNEL || "false").toLowerCase() === "true";
 
 if (!SLACK_SIGNING_SECRET) throw new Error("Missing SLACK_SIGNING_SECRET");
 if (!SLACK_BOT_TOKEN) throw new Error("Missing SLACK_BOT_TOKEN");
@@ -153,7 +149,7 @@ function buildCommandsHelp(prefix = "/") {
     `• \`${prefix}asistenciamanana\` — Asistencias de mañana (Jira).`,
     `• \`${prefix}detallesultimos30d\` — Detalles pendientes de los ultimos 30 días (Jira).`,
     `• \`${prefix}problemasultimos30d\` — Problemas pendientes de los ultimos 30 días (Jira).`,
-    `• \`${prefix}sistema_hidraulico\` — Envía PDF + link de los sistemas por DM.`,
+    `• \`${prefix}sistema_hidraulico\` — Envía PDF + lista de links (DM).`,
   ].join("\n");
 }
 
@@ -167,6 +163,7 @@ function formatIssueLine(issue) {
   return `• <${url}|${key}> — *${type}* — ${status} — ${summary}`;
 }
 
+// Respuesta por response_url (solo si querés un “ack”)
 async function respondViaResponseUrl(responseUrl, text, responseType = "ephemeral") {
   await fetch(responseUrl, {
     method: "POST",
@@ -179,42 +176,38 @@ async function respondViaResponseUrl(responseUrl, text, responseType = "ephemera
 }
 
 async function openDmChannel(userId) {
-  // conversations.open requiere im:write
   const r = await slack.conversations.open({ users: userId });
-  if (!r?.ok || !r.channel?.id) {
-    throw new Error(`No se pudo abrir DM con user=${userId}`);
-  }
+  if (!r?.ok || !r.channel?.id) throw new Error(`No se pudo abrir DM con user=${userId}`);
   return r.channel.id;
 }
 
-async function sendSistemaHidraulicoByDM({ userId, systemName, systemLink }) {
+async function dmText(userId, text) {
+  const dmChannelId = await openDmChannel(userId);
+  await slack.chat.postMessage({ channel: dmChannelId, text: (text || "").slice(0, 3800) });
+  return dmChannelId;
+}
+
+async function dmPdfAndText(userId, pdfAbsPath, filename, title, messageText) {
   const dmChannelId = await openDmChannel(userId);
 
-  // 1) Subir PDF al DM (privado)
-  const pdfPath = path.join(__dirname, "diagrama_ch", "Diagrama_CH_final.pdf");
-  if (!fs.existsSync(pdfPath)) {
-    throw new Error(`No existe el PDF en ${pdfPath}`);
-  }
-  const fileBuffer = fs.readFileSync(pdfPath);
+  if (!fs.existsSync(pdfAbsPath)) throw new Error(`No existe el PDF en ${pdfAbsPath}`);
+  const fileBuffer = fs.readFileSync(pdfAbsPath);
 
   const upload = await slack.files.uploadV2({
     channel_id: dmChannelId,
-    filename: "sistema_hidraulico.pdf",
-    title: systemName,
+    filename,
+    title,
     file: fileBuffer,
   });
 
-  if (!upload?.ok) {
-    throw new Error("No se pudo subir el PDF al DM (files.uploadV2)");
-  }
+  if (!upload?.ok) throw new Error("No se pudo subir el PDF al DM (files.uploadV2)");
 
-  // 2) Mensaje en DM con link “nombrado”
   await slack.chat.postMessage({
     channel: dmChannelId,
-    text: `*${systemName}*\n• Link: <${systemLink}|${systemName}>\n• PDF adjunto en este chat.`,
+    text: (messageText || "").slice(0, 3800),
   });
 
-  return { dmChannelId };
+  return dmChannelId;
 }
 
 // ───────── Healthcheck ─────────
@@ -229,7 +222,9 @@ app.use((req, _res, next) => {
 /**
  * ─────────────────────────────────────────────────────────────
  * SLASH COMMANDS: POST /slack/commands
- * Respuesta por response_url (ephemeral)
+ * - Abierto a TODO Slack (sin filtro por canal)
+ * - TODAS las respuestas van al DM
+ * - Opcional: ACK ephemeral en el canal con "Te lo mandé por DM"
  * ─────────────────────────────────────────────────────────────
  */
 app.post(
@@ -238,6 +233,9 @@ app.post(
   async (req, res) => {
     const reqId = crypto.randomUUID?.() || String(Date.now());
     const started = Date.now();
+
+    // Declaro responseUrl aquí para poder usarlo también en el catch
+    let responseUrl = "";
 
     try {
       console.log(`[SLASH][${reqId}] Incoming request`);
@@ -251,7 +249,7 @@ app.post(
       const command = (params.get("command") || "").trim();
       const channelId = (params.get("channel_id") || "").trim();
       const userId = (params.get("user_id") || "").trim();
-      const responseUrl = params.get("response_url");
+      responseUrl = params.get("response_url") || "";
 
       console.log(`[SLASH][${reqId}] command=${command} channel=${channelId} user=${userId}`);
 
@@ -260,86 +258,62 @@ app.post(
         return res.status(400).send("missing response_url");
       }
 
-      if (!ALLOWED_CHANNELS.has(channelId)) {
-        console.log(`[SLASH][${reqId}] channel not allowed`);
-        return res.status(200).json({
-          response_type: "ephemeral",
-          text: "Este comando no está habilitado en este canal.",
-        });
-      }
-
-      // ACK rápido
+      // ACK rápido (Slack exige respuesta <= 3s)
       res.status(200).send("");
       console.log(`[SLASH][${reqId}] ack sent in ${Date.now() - started}ms`);
 
+      // Helper: si querés confirmar en canal
+      const ack = async (msg) => {
+        if (!ACK_IN_CHANNEL) return;
+        await respondViaResponseUrl(responseUrl, msg || "Te lo envié por privado (DM).", "ephemeral");
+      };
+
       // ───────── /comandos ─────────
       if (command === "/comandos") {
-        await respondViaResponseUrl(responseUrl, buildCommandsHelp("/"), "ephemeral");
-        console.log(`[SLASH][${reqId}] responded /comandos`);
+        await dmText(userId, buildCommandsHelp("/"));
+        await ack("Te envié la lista de comandos por DM.");
+        console.log(`[SLASH][${reqId}] DM /comandos`);
         return;
       }
 
-      // ───────── /sistema_hidraulico (DM + PDF privado) ─────────
-      // ───────── /sistema_hidraulico (DM + PDF privado + lista links) ─────────
-if (command === "/sistema_hidraulico") {
-  const systemName = "Sistema hidráulico";
+      // ───────── /sistema_hidraulico (PDF + links por DM) ─────────
+      if (command === "/sistema_hidraulico") {
+        const systemName = "Sistema hidráulico";
 
-  const sistemas = [
-    { name: "Sistema Gruta N1", url: "https://cacheuta.atlassian.net/browse/CH-1" },
-    { name: "Sistema Gruta N2", url: "https://cacheuta.atlassian.net/browse/CH-637" },
-    { name: "Sistema Gruta N3", url: "https://cacheuta.atlassian.net/browse/CH-692" },
-    { name: "Sistema Gruta N4", url: "https://cacheuta.atlassian.net/browse/CH-970" },
-    { name: "Sistema Hidro", url: "https://cacheuta.atlassian.net/browse/CH-741" },
-    { name: "Sistema Ducha Fango Este", url: "https://cacheuta.atlassian.net/browse/CH-871" },
-    { name: "Sistema Ducha Fango Oeste", url: "https://cacheuta.atlassian.net/browse/CH-917" },
-    { name: "Sistema Aljibe Fango", url: "https://cacheuta.atlassian.net/browse/CH-882" },
-    { name: "Sistema Ascensor", url: "https://cacheuta.atlassian.net/browse/CH-888" },
-    { name: "Sistema Cacheutina", url: "https://cacheuta.atlassian.net/browse/CH-894" },
-    { name: "Sistema Chorro Cacheutina", url: "https://cacheuta.atlassian.net/browse/CH-924" },
-    { name: "Sistema Cascada", url: "https://cacheuta.atlassian.net/browse/CH-923" },
-    { name: "Sistema Agua Fría", url: "https://cacheuta.atlassian.net/browse/CH-910" },
-  ];
+        const sistemas = [
+          { name: "Sistema Gruta N1", url: "https://cacheuta.atlassian.net/browse/CH-1" },
+          { name: "Sistema Gruta N2", url: "https://cacheuta.atlassian.net/browse/CH-637" },
+          { name: "Sistema Gruta N3", url: "https://cacheuta.atlassian.net/browse/CH-692" },
+          { name: "Sistema Gruta N4", url: "https://cacheuta.atlassian.net/browse/CH-970" },
+          { name: "Sistema Hidro", url: "https://cacheuta.atlassian.net/browse/CH-741" },
+          { name: "Sistema Ducha Fango Este", url: "https://cacheuta.atlassian.net/browse/CH-871" },
+          { name: "Sistema Ducha Fango Oeste", url: "https://cacheuta.atlassian.net/browse/CH-917" },
+          { name: "Sistema Aljibe Fango", url: "https://cacheuta.atlassian.net/browse/CH-882" },
+          { name: "Sistema Ascensor", url: "https://cacheuta.atlassian.net/browse/CH-888" },
+          { name: "Sistema Cacheutina", url: "https://cacheuta.atlassian.net/browse/CH-894" },
+          { name: "Sistema Chorro Cacheutina", url: "https://cacheuta.atlassian.net/browse/CH-924" },
+          { name: "Sistema Cascada", url: "https://cacheuta.atlassian.net/browse/CH-923" },
+          { name: "Sistema Agua Fría", url: "https://cacheuta.atlassian.net/browse/CH-910" },
+        ];
 
-  const linksText =
-        sistemas.map((s) => `• <${s.url}|${s.name}>`).join("\n");
+        const linksText =
+          "*Sistemas disponibles:*\n" +
+          sistemas.map((s) => `• <${s.url}|${s.name}>`).join("\n");
 
-  // 1) Abrir DM
-  const dmChannelId = await openDmChannel(userId);
+        const pdfPath = path.join(__dirname, "diagrama_ch", "Diagrama_CH_final.pdf");
 
-  // 2) Subir PDF al DM (privado)
-  const pdfPath = path.join(__dirname, "diagrama_ch", "Diagrama_CH_final.pdf");
-  if (!fs.existsSync(pdfPath)) throw new Error(`No existe el PDF en ${pdfPath}`);
+        await dmPdfAndText(
+          userId,
+          pdfPath,
+          "Diagrama_CH_final.pdf",
+          systemName,
+          `*${systemName}*\n• PDF adjunto en este chat.\n\n${linksText}`
+        );
 
-  const fileBuffer = fs.readFileSync(pdfPath);
-
-  const upload = await slack.files.uploadV2({
-    channel_id: dmChannelId,
-    filename: "Diagrama_CH_final.pdf",
-    title: systemName,
-    file: fileBuffer,
-  });
-
-  if (!upload?.ok) throw new Error("No se pudo subir el PDF al DM (files.uploadV2)");
-
-  // 3) Enviar mensaje en DM con link principal + lista de links
-  await slack.chat.postMessage({
-    channel: dmChannelId,
-    text:
-      `*${systemName}*\n` +
-      linksText,
-  });
-
-  // 4) Confirmación ephemeral en el canal (solo el usuario la ve)
-  await respondViaResponseUrl(
-    responseUrl,
-    `Listo. Te envié por privado el PDF y la lista de links de *${systemName}*.`,
-    "ephemeral"
-  );
-
-  console.log(`[SLASH][${reqId}] responded /sistema_hidraulico (sent DM + pdf + links)`);
-  return;
-}
-
+        await ack(`Te envié por DM el PDF y la lista de links de *${systemName}*.`);
+        console.log(`[SLASH][${reqId}] DM /sistema_hidraulico`);
+        return;
+      }
 
       // ───────── /problemashoy ─────────
       if (command === "/problemashoy") {
@@ -348,8 +322,9 @@ if (command === "/sistema_hidraulico") {
         const header = `*Problemas de hoy* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
-        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
-        console.log(`[SLASH][${reqId}] responded /problemashoy count=${issues.length}`);
+        await dmText(userId, `${header}\n${body}`);
+        await ack("Te envié el reporte por DM.");
+        console.log(`[SLASH][${reqId}] DM /problemashoy count=${issues.length}`);
         return;
       }
 
@@ -360,8 +335,9 @@ if (command === "/sistema_hidraulico") {
         const header = `*Detalles de hoy* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para hoy.";
-        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
-        console.log(`[SLASH][${reqId}] responded /detalleshoy count=${issues.length}`);
+        await dmText(userId, `${header}\n${body}`);
+        await ack("Te envié el reporte por DM.");
+        console.log(`[SLASH][${reqId}] DM /detalleshoy count=${issues.length}`);
         return;
       }
 
@@ -372,8 +348,9 @@ if (command === "/sistema_hidraulico") {
         const header = `*Asistencias de mañana* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin resultados para mañana.";
-        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
-        console.log(`[SLASH][${reqId}] responded /asistenciamanana count=${issues.length}`);
+        await dmText(userId, `${header}\n${body}`);
+        await ack("Te envié el reporte por DM.");
+        console.log(`[SLASH][${reqId}] DM /asistenciamanana count=${issues.length}`);
         return;
       }
 
@@ -384,8 +361,9 @@ if (command === "/sistema_hidraulico") {
         const header = `*Detalles pendientes de los últimos 30 días* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin detalles pendientes.";
-        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
-        console.log(`[SLASH][${reqId}] responded /detallesultimos30d count=${issues.length}`);
+        await dmText(userId, `${header}\n${body}`);
+        await ack("Te envié el reporte por DM.");
+        console.log(`[SLASH][${reqId}] DM /detallesultimos30d count=${issues.length}`);
         return;
       }
 
@@ -396,24 +374,30 @@ if (command === "/sistema_hidraulico") {
         const header = `*Problemas pendientes de los últimos 30 días* — Total: *${issues.length}*`;
         const lines = issues.slice(0, 25).map(formatIssueLine);
         const body = lines.length ? lines.join("\n") : "• Sin problemas pendientes.";
-        await respondViaResponseUrl(responseUrl, `${header}\n${body}`, "ephemeral");
-        console.log(`[SLASH][${reqId}] responded /problemasultimos30d count=${issues.length}`);
+        await dmText(userId, `${header}\n${body}`);
+        await ack("Te envié el reporte por DM.");
+        console.log(`[SLASH][${reqId}] DM /problemasultimos30d count=${issues.length}`);
         return;
       }
 
       // Fallback
-      await respondViaResponseUrl(
-        responseUrl,
-        `Comando no reconocido: ${command}\n\n${buildCommandsHelp("/")}`,
-        "ephemeral"
-      );
-      console.log(`[SLASH][${reqId}] responded unknown command`);
+      await dmText(userId, `Comando no reconocido: ${command}\n\n${buildCommandsHelp("/")}`);
+      await ack("Te envié ayuda por DM.");
+      console.log(`[SLASH][${reqId}] DM unknown command`);
     } catch (err) {
       console.error(`[SLASH][${reqId}] ERROR`, err);
-      // Como ya mandamos ACK rápido, lo más útil es intentar avisar por response_url si existe:
+
+      // Best-effort: avisar al usuario por el canal (ephemeral) si lo tenés activado
       try {
-        // Intento best-effort: responder algo (si el error fue antes de tener responseUrl, no se puede)
+        if (ACK_IN_CHANNEL && responseUrl) {
+          const msg =
+            err?.data?.error === "missing_scope"
+              ? `Faltan permisos en Slack App. Needed: ${err.data.needed}`
+              : `Error ejecutando el comando: ${err.message}`;
+          await respondViaResponseUrl(responseUrl, msg, "ephemeral");
+        }
       } catch {}
+
       try {
         return res.status(500).send("server error");
       } catch {
