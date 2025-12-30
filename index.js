@@ -301,8 +301,7 @@ if (command === "/sistema_hidraulico") {
   ];
 
   const linksText =
-    "*Sistemas disponibles:*\n" +
-    sistemas.map((s) => `• <${s.url}|${s.name}>`).join("\n");
+        sistemas.map((s) => `• <${s.url}|${s.name}>`).join("\n");
 
   // 1) Abrir DM
   const dmChannelId = await openDmChannel(userId);
