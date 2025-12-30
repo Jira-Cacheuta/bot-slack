@@ -280,24 +280,71 @@ app.post(
       }
 
       // ───────── /sistema_hidraulico (DM + PDF privado) ─────────
-      if (command === "/sistema_hidraulico") {
-        const systemName = "Sistema hidráulico";
-        const systemLink =
-          process.env.SISTEMA_HIDRAULICO_URL || "https://cacheuta.atlassian.net/browse/CH-1";
+      // ───────── /sistema_hidraulico (DM + PDF privado + lista links) ─────────
+if (command === "/sistema_hidraulico") {
+  const systemName = "Sistema hidráulico";
+  const systemLink =
+    process.env.SISTEMA_HIDRAULICO_URL || "https://cacheuta.atlassian.net/browse/CH-741";
 
-        // Enviar por DM
-        await sendSistemaHidraulicoByDM({ userId, systemName, systemLink });
+  const sistemas = [
+    { name: "Sistema Gruta N1", url: "https://cacheuta.atlassian.net/browse/CH-1" },
+    { name: "Sistema Gruta N2", url: "https://cacheuta.atlassian.net/browse/CH-637" },
+    { name: "Sistema Gruta N3", url: "https://cacheuta.atlassian.net/browse/CH-692" },
+    { name: "Sistema Gruta N4", url: "https://cacheuta.atlassian.net/browse/CH-970" },
+    { name: "Sistema Hidro", url: "https://cacheuta.atlassian.net/browse/CH-741" },
+    { name: "Sistema Ducha Fango Este", url: "https://cacheuta.atlassian.net/browse/CH-871" },
+    { name: "Sistema Ducha Fango Oeste", url: "https://cacheuta.atlassian.net/browse/CH-917" },
+    { name: "Sistema Aljibe Fango", url: "https://cacheuta.atlassian.net/browse/CH-882" },
+    { name: "Sistema Ascensor", url: "https://cacheuta.atlassian.net/browse/CH-888" },
+    { name: "Sistema Cacheutina", url: "https://cacheuta.atlassian.net/browse/CH-894" },
+    { name: "Sistema Chorro Cacheutina", url: "https://cacheuta.atlassian.net/browse/CH-924" },
+    { name: "Sistema Cascada", url: "https://cacheuta.atlassian.net/browse/CH-923" },
+    { name: "Sistema Agua Fría", url: "https://cacheuta.atlassian.net/browse/CH-910" },
+  ];
 
-        // Confirmación ephemeral en el canal
-        await respondViaResponseUrl(
-          responseUrl,
-          `Listo. Te envié por privado el PDF y el link de *${systemName}*.`,
-          "ephemeral"
-        );
+  const linksText =
+    "*Sistemas disponibles:*\n" +
+    sistemas.map((s) => `• <${s.url}|${s.name}>`).join("\n");
 
-        console.log(`[SLASH][${reqId}] responded /sistema_hidraulico (sent DM)`);
-        return;
-      }
+  // 1) Abrir DM
+  const dmChannelId = await openDmChannel(userId);
+
+  // 2) Subir PDF al DM (privado)
+  const pdfPath = path.join(__dirname, "diagrama_ch", "Diagrama_CH_final.pdf");
+  if (!fs.existsSync(pdfPath)) throw new Error(`No existe el PDF en ${pdfPath}`);
+
+  const fileBuffer = fs.readFileSync(pdfPath);
+
+  const upload = await slack.files.uploadV2({
+    channel_id: dmChannelId,
+    filename: "Diagrama_CH_final.pdf",
+    title: systemName,
+    file: fileBuffer,
+  });
+
+  if (!upload?.ok) throw new Error("No se pudo subir el PDF al DM (files.uploadV2)");
+
+  // 3) Enviar mensaje en DM con link principal + lista de links
+  await slack.chat.postMessage({
+    channel: dmChannelId,
+    text:
+      `*${systemName}*\n` +
+      `• Link principal: <${systemLink}|${systemName}>\n` +
+      `• PDF adjunto en este chat.\n\n` +
+      linksText,
+  });
+
+  // 4) Confirmación ephemeral en el canal (solo el usuario la ve)
+  await respondViaResponseUrl(
+    responseUrl,
+    `Listo. Te envié por privado el PDF y la lista de links de *${systemName}*.`,
+    "ephemeral"
+  );
+
+  console.log(`[SLASH][${reqId}] responded /sistema_hidraulico (sent DM + pdf + links)`);
+  return;
+}
+
 
       // ───────── /problemashoy ─────────
       if (command === "/problemashoy") {
