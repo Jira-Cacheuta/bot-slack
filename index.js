@@ -61,6 +61,29 @@ const EJECUTANTES = [
       "5. Gustavo Soria",
     ],
   },
+
+  {
+    label: "Raul Lopez",
+    values: [
+      "1. Raul Lopez",
+      "2. Raul Lopez",
+      "3. Raul Lopez",
+      "4. Raul Lopez",
+      "5. Raul Lopez",
+    ],
+  },
+
+  {
+    label: "Juan Carlos Villegas",
+    values: [
+      "1. Juan Carlos Villegas",
+      "2. Juan Carlos Villegas",
+      "3. Juan Carlos Villegas",
+      "4. Juan Carlos Villegas",
+      "5. Juan Carlos Villegas",
+    ],
+  },
+  
   // Agregá más ejecutantes aquí…
 ];
 
