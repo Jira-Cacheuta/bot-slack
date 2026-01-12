@@ -34,26 +34,35 @@ if (!JIRA_API_TOKEN) throw new Error("Missing JIRA_API_TOKEN");
 
 const slack = new WebClient(SLACK_BOT_TOKEN);
 
-// ───────── Mapeo Slack user -> Ejecutante (customfield_10714) ─────────
+// ───────── Ejecutantes para panel (customfield_10714) ─────────
 // IMPORTANTE: los strings deben coincidir EXACTO con las opciones del campo en Jira.
-const EJECUTANTE_BY_SLACK_USER = {
-  // Adrian Tacinazzo (Slack user_id ejemplo que pasaste)
-  D09ARA2BL7M: [
-    "1. Adrian Tacinazzo",
-    "2. Adrian Tacinazzo",
-    "3. Adrian Tacinazzo",
-    "4. Adrian Tacinazzo",
-    "5. Adrian Tacinazzo",
-  ],
-  // Agregá más usuarios aquí...
-  //Octavio Colman
-  U098XAH8FFV: [
-    "1. Octavio Colman", 
-    "2. Octavio Colman",
-    "3.Octavio Colman",
-      ],
-  // U0XXXXXXX: ["1. Nombre Apellido", "2. Nombre Apellido", ...]
-};
+const EJECUTANTES = [
+  {
+    label: "Adrian Tacinazzo",
+    values: [
+      "1. Adrian Tacinazzo",
+      "2. Adrian Tacinazzo",
+      "3. Adrian Tacinazzo",
+      "4. Adrian Tacinazzo",
+      "5. Adrian Tacinazzo",
+    ],
+  },
+  {
+    label: "Octavio Colman",
+    values: ["1. Octavio Colman", "2. Octavio Colman", "3.Octavio Colman"],
+  },
+  {
+    label: "Gustavo Soria",
+    values: [
+      "1. Gustavo Soria",
+      "2. Gustavo Soria",
+      "3. Gustavo Soria",
+      "4. Gustavo Soria",
+      "5. Gustavo Soria",
+    ],
+  },
+  // Agregá más ejecutantes aquí…
+];
 
 // ───────── JQLs ─────────
 const JQL_PROBLEMAS_HOY = `
@@ -165,7 +174,7 @@ function buildCommandsHelp(prefix = "/") {
   return [
     "*Comandos disponibles:*",
     `• \`${prefix}comandos\` — Lista de comandos.`,
-    `• \`${prefix}mistareasdehoy\` — Tareas con vencimiento hoy donde sos el ejecutante (Jira).`,
+    `• \`${prefix}mistareasdehoy\` — Panel por ejecutante (botones a JQL de hoy).`,
     `• \`${prefix}problemashoy\` — Problemas creados hoy (Jira).`,
     `• \`${prefix}detalleshoy\` — Detalles creados hoy (Jira).`,
     `• \`${prefix}asistenciamanana\` — Asistencias de mañana (Jira).`,
@@ -203,9 +212,11 @@ async function openDmChannel(userId) {
   return r.channel.id;
 }
 
-async function dmText(userId, text) {
+async function dmText(userId, text, blocks) {
   const dmChannelId = await openDmChannel(userId);
-  await slack.chat.postMessage({ channel: dmChannelId, text: (text || "").slice(0, 3800) });
+  const payload = { channel: dmChannelId, text: (text || "").slice(0, 3800) };
+  if (blocks) payload.blocks = blocks;
+  await slack.chat.postMessage(payload);
   return dmChannelId;
 }
 
@@ -230,6 +241,71 @@ async function dmPdfAndText(userId, pdfAbsPath, filename, title, messageText) {
   });
 
   return dmChannelId;
+}
+
+// ───────── NUEVO: panel /mistareasdehoy (links por ejecutante) ─────────
+function buildJqlForEjecutanteToday(values) {
+  const quoted = values.map((v) => `"${String(v).replace(/"/g, '\\"')}"`).join(", ");
+  return `
+due >= startOfDay()
+AND duedate < startOfDay("+1d")
+AND customfield_10714 in (${quoted})
+ORDER BY duedate ASC, created ASC
+  `.trim();
+}
+
+function buildJiraIssuesUrlFromJql(jql) {
+  // Jira Cloud: /issues/?jql=...
+  return `${JIRA_BASE_URL}/issues/?jql=${encodeURIComponent(jql)}`;
+}
+
+function buildEjecutantesButtonsBlocks() {
+  const blocks = [
+    {
+      type: "header",
+      text: { type: "plain_text", text: "Mis tareas de hoy — por ejecutante", emoji: true },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "Elegí un ejecutante y se abre el listado en Jira (JQL prearmado para *hoy*).",
+      },
+    },
+    { type: "divider" },
+  ];
+
+  let row = [];
+  for (const e of EJECUTANTES) {
+    const jql = buildJqlForEjecutanteToday(e.values);
+    const url = buildJiraIssuesUrlFromJql(jql);
+
+    row.push({
+      type: "button",
+      text: { type: "plain_text", text: e.label, emoji: true },
+      url,
+    });
+
+    if (row.length === 5) {
+      blocks.push({ type: "actions", elements: row });
+      row = [];
+    }
+  }
+  if (row.length) blocks.push({ type: "actions", elements: row });
+
+  blocks.push({ type: "divider" });
+  blocks.push({
+    type: "context",
+    elements: [
+      {
+        type: "mrkdwn",
+        text:
+          "Nota: los links abren un filtro en Jira usando `due`=hoy y `customfield_10714` con las variantes (1..5).",
+      },
+    ],
+  });
+
+  return blocks;
 }
 
 // ───────── Healthcheck ─────────
@@ -298,58 +374,14 @@ app.post(
         return;
       }
 
+      // ───────── /mistareasdehoy (NUEVO: panel con botones a JQL) ─────────
       if (command === "/mistareasdehoy") {
-  const ejecutantes = EJECUTANTE_BY_SLACK_USER[userId];
-
-  if (!ejecutantes || ejecutantes.length === 0) {
-    await dmText(
-      userId,
-      "No tengo configurado tu mapeo Slack → Jira (customfield_10714). Avisame tu nombre exacto en las opciones del campo y lo agrego."
-    );
-    await ack("Te respondí por DM (falta configuración de tu usuario).");
-    console.log(`[SLASH][${reqId}] /mistareasdehoy missing mapping user=${userId}`);
-    return;
-  }
-
-  // Construye: "customfield_10714" in ("1. Adrian...", "2. Adrian...", ...)
-  const ejecutantesJql = ejecutantes
-    .map((v) => `"${String(v).replaceAll('"', '\\"')}"`)
-    .join(", ");
-
-  const jql = `
-due >= startOfDay()
-AND due < startOfDay("+1d")
-AND customfield_10714 in (${ejecutantesJql})
-ORDER BY due ASC, created ASC
-  `.trim();
-
-  // Pedimos 'duedate' para mostrarlo si querés en el output
-  const data = await jiraSearch(jql, 100, "summary,issuetype,status,duedate");
-  const issues = data.issues || [];
-
-  let text;
-  if (!issues.length) {
-    text = `*Mis tareas de hoy* — 0 resultados.\n(Filtro: due hoy + ejecutante = tus variantes configuradas)`;
-  } else {
-    const lines = issues.slice(0, 50).map((it) => {
-      const key = it.key;
-      const summary = it.fields?.summary || "";
-      const status = it.fields?.status?.name || "";
-      const type = it.fields?.issuetype?.name || "";
-      const due = it.fields?.duedate ? ` — vence: ${it.fields.duedate}` : "";
-      const url = `${JIRA_BASE_URL}/browse/${key}`;
-      return `• <${url}|${key}> — *${type}* — ${status}${due} — ${summary}`;
-    });
-
-    text = `*Mis tareas de hoy* — Total: *${issues.length}*\n${lines.join("\n")}`;
-  }
-
-  await dmText(userId, text);
-  await ack("Te envié tus tareas de hoy por DM.");
-  console.log(`[SLASH][${reqId}] /mistareasdehoy sent count=${issues.length}`);
-  return;
-}
-
+        const blocks = buildEjecutantesButtonsBlocks();
+        await dmText(userId, "Panel de tareas de hoy por ejecutante (abrir en Jira).", blocks);
+        await ack("Te envié por DM el panel de ejecutantes.");
+        console.log(`[SLASH][${reqId}] DM /mistareasdehoy panel ejecutantes=${EJECUTANTES.length}`);
+        return;
+      }
 
       // ───────── /sistema_hidraulico (PDF + links por DM) ─────────
       if (command === "/sistema_hidraulico") {
@@ -372,8 +404,7 @@ ORDER BY due ASC, created ASC
         ];
 
         const linksText =
-          "*Sistemas disponibles:*\n" +
-          sistemas.map((s) => `• <${s.url}|${s.name}>`).join("\n");
+          "*Sistemas disponibles:*\n" + sistemas.map((s) => `• <${s.url}|${s.name}>`).join("\n");
 
         const pdfPath = path.join(__dirname, "diagrama_ch", "Diagrama_CH_final.pdf");
 
