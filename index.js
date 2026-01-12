@@ -46,6 +46,12 @@ const EJECUTANTE_BY_SLACK_USER = {
     "5. Adrian Tacinazzo",
   ],
   // Agregá más usuarios aquí...
+  //Octavio Colman
+  U098XAH8FFV: [
+    "1. Octavio Colman", 
+    "2. Octavio Colman",
+    "3.Octavio Colman",
+      ],
   // U0XXXXXXX: ["1. Nombre Apellido", "2. Nombre Apellido", ...]
 };
 
