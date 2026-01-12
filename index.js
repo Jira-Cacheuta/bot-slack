@@ -34,6 +34,21 @@ if (!JIRA_API_TOKEN) throw new Error("Missing JIRA_API_TOKEN");
 
 const slack = new WebClient(SLACK_BOT_TOKEN);
 
+// ───────── Mapeo Slack user -> Ejecutante (customfield_10714) ─────────
+// IMPORTANTE: los strings deben coincidir EXACTO con las opciones del campo en Jira.
+const EJECUTANTE_BY_SLACK_USER = {
+  // Adrian Tacinazzo (Slack user_id ejemplo que pasaste)
+  D09ARA2BL7M: [
+    "1. Adrian Tacinazzo",
+    "2. Adrian Tacinazzo",
+    "3. Adrian Tacinazzo",
+    "4. Adrian Tacinazzo",
+    "5. Adrian Tacinazzo",
+  ],
+  // Agregá más usuarios aquí...
+  // U0XXXXXXX: ["1. Nombre Apellido", "2. Nombre Apellido", ...]
+};
+
 // ───────── JQLs ─────────
 const JQL_PROBLEMAS_HOY = `
 issuetype in (
@@ -112,14 +127,14 @@ function jiraAuthHeader() {
   return `Basic ${token}`;
 }
 
-async function jiraSearch(jql, maxResults = 50) {
+async function jiraSearch(jql, maxResults = 50, fieldsCsv = "summary,issuetype,status") {
   const url =
     `${JIRA_BASE_URL}/rest/api/3/search/jql` +
     `?jql=${encodeURIComponent(jql)}` +
-    `&fields=${encodeURIComponent("summary,issuetype,status")}` +
+    `&fields=${encodeURIComponent(fieldsCsv)}` +
     `&maxResults=${encodeURIComponent(String(maxResults))}`;
 
-  console.log(`[JIRA] GET /search/jql maxResults=${maxResults}`);
+  console.log(`[JIRA] GET /search/jql maxResults=${maxResults} fields=${fieldsCsv}`);
 
   const resp = await fetch(url, {
     method: "GET",
@@ -144,6 +159,7 @@ function buildCommandsHelp(prefix = "/") {
   return [
     "*Comandos disponibles:*",
     `• \`${prefix}comandos\` — Lista de comandos.`,
+    `• \`${prefix}mistareasdehoy\` — Tareas con vencimiento hoy donde sos el ejecutante (Jira).`,
     `• \`${prefix}problemashoy\` — Problemas creados hoy (Jira).`,
     `• \`${prefix}detalleshoy\` — Detalles creados hoy (Jira).`,
     `• \`${prefix}asistenciamanana\` — Asistencias de mañana (Jira).`,
@@ -275,6 +291,59 @@ app.post(
         console.log(`[SLASH][${reqId}] DM /comandos`);
         return;
       }
+
+      if (command === "/mistareasdehoy") {
+  const ejecutantes = EJECUTANTE_BY_SLACK_USER[userId];
+
+  if (!ejecutantes || ejecutantes.length === 0) {
+    await dmText(
+      userId,
+      "No tengo configurado tu mapeo Slack → Jira (customfield_10714). Avisame tu nombre exacto en las opciones del campo y lo agrego."
+    );
+    await ack("Te respondí por DM (falta configuración de tu usuario).");
+    console.log(`[SLASH][${reqId}] /mistareasdehoy missing mapping user=${userId}`);
+    return;
+  }
+
+  // Construye: "customfield_10714" in ("1. Adrian...", "2. Adrian...", ...)
+  const ejecutantesJql = ejecutantes
+    .map((v) => `"${String(v).replaceAll('"', '\\"')}"`)
+    .join(", ");
+
+  const jql = `
+due >= startOfDay()
+AND due < startOfDay("+1d")
+AND customfield_10714 in (${ejecutantesJql})
+ORDER BY due ASC, created ASC
+  `.trim();
+
+  // Pedimos 'duedate' para mostrarlo si querés en el output
+  const data = await jiraSearch(jql, 100, "summary,issuetype,status,duedate");
+  const issues = data.issues || [];
+
+  let text;
+  if (!issues.length) {
+    text = `*Mis tareas de hoy* — 0 resultados.\n(Filtro: due hoy + ejecutante = tus variantes configuradas)`;
+  } else {
+    const lines = issues.slice(0, 50).map((it) => {
+      const key = it.key;
+      const summary = it.fields?.summary || "";
+      const status = it.fields?.status?.name || "";
+      const type = it.fields?.issuetype?.name || "";
+      const due = it.fields?.duedate ? ` — vence: ${it.fields.duedate}` : "";
+      const url = `${JIRA_BASE_URL}/browse/${key}`;
+      return `• <${url}|${key}> — *${type}* — ${status}${due} — ${summary}`;
+    });
+
+    text = `*Mis tareas de hoy* — Total: *${issues.length}*\n${lines.join("\n")}`;
+  }
+
+  await dmText(userId, text);
+  await ack("Te envié tus tareas de hoy por DM.");
+  console.log(`[SLASH][${reqId}] /mistareasdehoy sent count=${issues.length}`);
+  return;
+}
+
 
       // ───────── /sistema_hidraulico (PDF + links por DM) ─────────
       if (command === "/sistema_hidraulico") {
