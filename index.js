@@ -247,9 +247,9 @@ async function dmPdfAndText(userId, pdfAbsPath, filename, title, messageText) {
 function buildJqlForEjecutanteToday(values) {
   const quoted = values.map((v) => `"${String(v).replace(/"/g, '\\"')}"`).join(", ");
   return `
-due >= startOfDay()
+duedate >= startOfDay()
 AND duedate < startOfDay("+1d")
-AND customfield_10714 in (${quoted})
+AND "Ejecutante 2.0[Select List (multiple choices)]" in (${quoted})
 ORDER BY duedate ASC, created ASC
   `.trim();
 }
