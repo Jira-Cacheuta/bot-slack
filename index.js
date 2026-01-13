@@ -242,7 +242,7 @@ function buildJqlForEjecutanteToday(ejecutanteLabel) {
 
   return `
 due >= startOfDay()
-AND due < startOfDay("+1d")
+AND due < startOfDay("+1")
 AND cf[10813] = ${v}
 ORDER BY due ASC, created ASC
   `.trim();
