@@ -48,10 +48,6 @@ const EJECUTANTES = [
     ],
   },
   {
-    label: "Octavio Colman",
-    values: ["1. Octavio Colman", "2. Octavio Colman", "3.Octavio Colman"],
-  },
-  {
     label: "Gustavo Soria",
     values: [
       "1. Gustavo Soria",
@@ -84,6 +80,29 @@ const EJECUTANTES = [
     ],
   },
   
+  {
+    label: "Ariel Garay",
+    values: [
+      "1. Ariel Garay",
+      "2. Ariel Garay",
+      "3. Ariel Garay",
+      "4. Ariel Garay",
+      "5. Ariel Garay",
+    ],
+  },
+
+  {
+    label: "Franco Arenas",
+    values: [
+      "1. Franco Arenas",
+      "2. Franco Arenas",
+      "3. Franco Arenas",
+      "4. Franco Arenas",
+      "5. Franco Arenas",
+    ],
+  },
+  
+
   // Agregá más ejecutantes aquí…
 ];
 
@@ -270,9 +289,9 @@ async function dmPdfAndText(userId, pdfAbsPath, filename, title, messageText) {
 function buildJqlForEjecutanteToday(values) {
   const quoted = values.map((v) => `"${String(v).replace(/"/g, '\\"')}"`).join(", ");
   return `
-duedate >= startOfDay()
+issuetype = Epic AND duedate >= startOfDay()
 AND duedate < startOfDay("+1d")
-AND "Ejecutante 2.0[Select List (multiple choices)]" in (${quoted})
+AND "Personal asignado[Select List (multiple choices)]" in (${quoted})
 ORDER BY duedate ASC, created ASC
   `.trim();
 }
@@ -286,13 +305,13 @@ function buildEjecutantesButtonsBlocks() {
   const blocks = [
     {
       type: "header",
-      text: { type: "plain_text", text: "Mis tareas de hoy — por ejecutante", emoji: true },
+      text: { type: "plain_text", text: "Tareas por ejecutante", emoji: true },
     },
     {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: "Elegí un ejecutante y se abre el listado en Jira (JQL prearmado para *hoy*).",
+        text: "Elegí un ejecutante y se abrirá el listado de tareas en Jira.",
       },
     },
     { type: "divider" },
@@ -317,17 +336,6 @@ function buildEjecutantesButtonsBlocks() {
   if (row.length) blocks.push({ type: "actions", elements: row });
 
   blocks.push({ type: "divider" });
-  blocks.push({
-    type: "context",
-    elements: [
-      {
-        type: "mrkdwn",
-        text:
-          "Nota: los links abren un filtro en Jira usando `due`=hoy y `customfield_10714` con las variantes (1..5).",
-      },
-    ],
-  });
-
   return blocks;
 }
 
