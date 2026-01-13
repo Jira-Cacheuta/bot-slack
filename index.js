@@ -243,6 +243,7 @@ function buildJqlForEjecutanteToday(ejecutanteLabel) {
   return `
 issuetype = Epic
 AND duedate >= startOfDay()
+AND duedate <= endOfDay()
 AND "Personal asignado[Select List (multiple choices)]" = ${v}
 ORDER BY due ASC, created ASC
   `.trim();
