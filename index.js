@@ -241,9 +241,9 @@ function buildJqlForEjecutanteToday(ejecutanteLabel) {
   const v = `"${String(ejecutanteLabel).replace(/"/g, '\\"')}"`;
 
   return `
-due >= startOfDay()
-AND due < startOfDay("+1")
-AND cf[10813] = ${v}
+issuetype = Epic
+AND duedate >= startOfDay()
+AND "Personal asignado[Select List (multiple choices)]" = ${v}
 ORDER BY due ASC, created ASC
   `.trim();
 }
