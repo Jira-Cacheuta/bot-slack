@@ -37,74 +37,16 @@ const slack = new WebClient(SLACK_BOT_TOKEN);
 // ───────── Ejecutantes para panel (customfield_10714) ─────────
 // IMPORTANTE: los strings deben coincidir EXACTO con las opciones del campo en Jira.
 const EJECUTANTES = [
-  {
-    label: "Adrian Tacinazzo",
-    values: [
-      "1. Adrian Tacinazzo",
-      "2. Adrian Tacinazzo",
-      "3. Adrian Tacinazzo",
-      "4. Adrian Tacinazzo",
-      "5. Adrian Tacinazzo",
-    ],
-  },
-  {
-    label: "Gustavo Soria",
-    values: [
-      "1. Gustavo Soria",
-      "2. Gustavo Soria",
-      "3. Gustavo Soria",
-      "4. Gustavo Soria",
-      "5. Gustavo Soria",
-    ],
-  },
-
-  {
-    label: "Raul Lopez",
-    values: [
-      "1. Raul Lopez",
-      "2. Raul Lopez",
-      "3. Raul Lopez",
-      "4. Raul Lopez",
-      "5. Raul Lopez",
-    ],
-  },
-
-  {
-    label: "Juan Carlos Villegas",
-    values: [
-      "1. Juan Carlos Villegas",
-      "2. Juan Carlos Villegas",
-      "3. Juan Carlos Villegas",
-      "4. Juan Carlos Villegas",
-      "5. Juan Carlos Villegas",
-    ],
-  },
-  
-  {
-    label: "Ariel Garay",
-    values: [
-      "1. Ariel Garay",
-      "2. Ariel Garay",
-      "3. Ariel Garay",
-      "4. Ariel Garay",
-      "5. Ariel Garay",
-    ],
-  },
-
-  {
-    label: "Franco Arenas",
-    values: [
-      "1. Franco Arenas",
-      "2. Franco Arenas",
-      "3. Franco Arenas",
-      "4. Franco Arenas",
-      "5. Franco Arenas",
-    ],
-  },
-  
+  { label: "Adrian Tacinazzo" },
+  { label: "Gustavo Soria" },
+  { label: "Raul Lopez" },
+  { label: "Juan Carlos Villegas" },
+  { label: "Ariel Garay" },
+  { label: "Franco Arenas" },
+];
 
   // Agregá más ejecutantes aquí…
-];
+
 
 // ───────── JQLs ─────────
 const JQL_PROBLEMAS_HOY = `
@@ -286,15 +228,17 @@ async function dmPdfAndText(userId, pdfAbsPath, filename, title, messageText) {
 }
 
 // ───────── NUEVO: panel /mistareasdehoy (links por ejecutante) ─────────
-function buildJqlForEjecutanteToday(values) {
-  const quoted = values.map((v) => `"${String(v).replace(/"/g, '\\"')}"`).join(", ");
+function buildJqlForEjecutanteToday(ejecutanteLabel) {
+  const v = `"${String(ejecutanteLabel).replace(/"/g, '\\"')}"`;
+
   return `
-issuetype = Epic AND duedate >= startOfDay()
-AND duedate < startOfDay("+1d")
-AND "Personal asignado[Select List (multiple choices)]" in (${quoted})
-ORDER BY duedate ASC, created ASC
+due >= startOfDay()
+AND due < startOfDay("+1d")
+AND cf[10813] = ${v}
+ORDER BY due ASC, created ASC
   `.trim();
 }
+
 
 function buildJiraIssuesUrlFromJql(jql) {
   // Jira Cloud: /issues/?jql=...
@@ -319,7 +263,7 @@ function buildEjecutantesButtonsBlocks() {
 
   let row = [];
   for (const e of EJECUTANTES) {
-    const jql = buildJqlForEjecutanteToday(e.values);
+    const jql = buildJqlForEjecutanteToday(e.label);
     const url = buildJiraIssuesUrlFromJql(jql);
 
     row.push({
