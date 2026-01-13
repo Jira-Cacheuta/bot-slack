@@ -43,6 +43,15 @@ const EJECUTANTES = [
   { label: "Juan Carlos Villegas" },
   { label: "Ariel Garay" },
   { label: "Franco Arenas" },
+  { label: "Sergio Fernandez" },
+  { label: "Agustin Miranda" },
+  { label: "Leonel Mendez" },
+  { label: "Angel Urista" },
+  { label: "Cesar Franco" },
+  { label: "Juan Manuel Magallanes" },
+  { label: "Manuel Campusano" },
+  { label: "Nicolas Ozam" },
+  { label: "Jorge Lucero" },
 ];
 
   // Agregá más ejecutantes aquí…
