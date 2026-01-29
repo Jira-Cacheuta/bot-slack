@@ -45,13 +45,19 @@ const EJECUTANTES = [
   { label: "Franco Arenas" },
   { label: "Sergio Fernandez" },
   { label: "Agustin Miranda" },
-  { label: "Leonel Mendez" },
+  { label: "Juan Carlos Moreno" },
+  {label: "Cristian Funes"},
+  {label: "Sebastian Riquelme"},
+  {label: "Nicolas Cabello"},
+  {label: "Mariano Llarte"},
   { label: "Angel Urista" },
   { label: "Cesar Franco" },
   { label: "Juan Manuel Magallanes" },
   { label: "Manuel Campusano" },
-  { label: "Nicolas Ozam" },
+  { label: "Nicolas Ozan" },
   { label: "Jorge Lucero" },
+  {label: "Rodolfo Romero"},
+  {label: "Manuel Campusano"},
 ];
 
   // Agregá más ejecutantes aquí…
